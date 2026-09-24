@@ -41,10 +41,13 @@ var head_mat: StandardMaterial3D
 var tail_mat: StandardMaterial3D
 var parts: Array[CarPart] = []
 var model: Node3D
+var detail := 2            # 0..4 — из пресета качества
+var rim_style := "sport5"
 
 
 func build(p_spec: Dictionary, color: Color) -> Dictionary:
 	spec = p_spec
+	detail = int(Settings.get_v("quality_level"))
 	t = TEMPLATES.get(spec["body"], TEMPLATES["sedan"])
 	L = spec["L"]
 	W = spec["W"]
@@ -95,6 +98,7 @@ func build(p_spec: Dictionary, color: Color) -> Dictionary:
 	if t.get("cargo", false):
 		_build_cargo()
 	var wheels := _build_wheels()
+	CarDetails.new(self).build()
 
 	for p in parts:
 		p.base_transform = p.node.transform
@@ -223,14 +227,21 @@ func section(u: float) -> Dictionary:
 	return {"hw": hw, "y0": y0, "y1c": y1c, "y1s": y1s, "rt": rt, "tumble": min(0.04, hw * 0.04)}
 
 
+## x борта на высоте y — по реальной полуполилинии сечения
 func side_x(sec: Dictionary, y: float) -> float:
-	var hw: float = sec["hw"]
-	var ymid: float = (sec["y0"] + sec["y1s"]) * 0.5
-	var ytop: float = sec["y1s"] - sec["rt"]
-	if y <= ymid:
-		return hw
-	var k: float = clamp((y - ymid) / max(0.01, ytop - ymid), 0.0, 1.0)
-	return hw - sec["tumble"] * k
+	var half := _ring_half(sec)
+	# точки идут снизу вверх по борту до начала скругления крыши
+	var best: float = sec["hw"]
+	for i in half.size() - 1:
+		var a: Vector2 = half[i]
+		var c: Vector2 = half[i + 1]
+		if c.y <= a.y:
+			continue
+		if y >= a.y and y <= c.y:
+			return lerp(a.x, c.x, (y - a.y) / (c.y - a.y))
+	if y < half[0].y:
+		best = half[0].x
+	return best
 
 
 func top_y(sec: Dictionary, x: float) -> float:
@@ -239,26 +250,39 @@ func top_y(sec: Dictionary, x: float) -> float:
 	return lerp(float(sec["y1c"]), float(sec["y1s"]), k * k)
 
 
-func _ring_low(sec: Dictionary) -> PackedVector2Array:
+func _ring_half(sec: Dictionary) -> Array[Vector2]:
 	var hw: float = sec["hw"]
 	var y0: float = sec["y0"]
 	var y1s: float = sec["y1s"]
 	var rt: float = sec["rt"]
 	var tb: float = sec["tumble"]
-	var rb: float = min(0.05, (y1s - y0) * 0.2)
+	var h := y1s - y0
+	var rb: float = min(0.05, h * 0.2)
 	var half: Array[Vector2] = []
-	half.append(Vector2(hw - rb, y0))
-	half.append(Vector2(hw - rb + rb * 0.7071, y0 + rb - rb * 0.7071))
-	half.append(Vector2(hw, y0 + rb))
-	half.append(Vector2(hw, lerp(y0 + rb, y1s - rt, 0.5)))
+	# низ и порог (чуть утоплен)
+	half.append(Vector2(hw - rb - 0.01, y0))
+	half.append(Vector2(hw - 0.012 - rb * 0.3, y0 + rb * 0.45))
+	half.append(Vector2(hw - 0.012, y0 + rb))
+	# борт с лёгкой выпуклостью
+	half.append(Vector2(hw, y0 + rb + h * 0.12))
+	half.append(Vector2(hw + 0.006, lerp(y0 + rb, y1s - rt, 0.45)))
+	# линия плеч — острая кромка даёт блик вдоль борта
+	var ysh: float = max(y1s - rt - h * 0.12, y0 + rb + h * 0.3)
+	half.append(Vector2(hw + 0.01, ysh))
+	half.append(Vector2(hw - tb * 0.4, ysh + 0.012))
 	var cx := hw - tb - rt
 	var cy := y1s - rt
-	for a in [0.0, 30.0, 60.0, 90.0]:
+	for a in [0.0, 22.5, 45.0, 67.5, 90.0]:
 		var r := deg_to_rad(a)
 		half.append(Vector2(cx + rt * cos(r), cy + rt * sin(r)))
 	half.append(Vector2(cx * 0.5, top_y(sec, cx * 0.5)))
+	return half
+
+
+func _ring_low(sec: Dictionary) -> PackedVector2Array:
+	var half := _ring_half(sec)
 	var ring := PackedVector2Array()
-	ring.append(Vector2(0, y0))
+	ring.append(Vector2(0, sec["y0"]))
 	for p in half:
 		ring.append(p)
 	ring.append(Vector2(0, sec["y1c"]))
@@ -276,7 +300,7 @@ func _section_us(n: int) -> PackedFloat32Array:
 
 
 func _build_body() -> void:
-	var n: int = clamp(int(L / 0.1), 34, 90)
+	var n: int = clamp(int(L / (0.085 if detail >= 2 else 0.11)), 32, 110)
 	var us := _section_us(n)
 	var rings: Array = []
 	var zs := PackedFloat32Array()
@@ -465,7 +489,7 @@ func _flip(idx: PackedInt32Array) -> void:
 
 # ---------------------------------------------------------------- навесные панели
 
-func _panel_part(name: String, kind: String, grid: Array, normals: Array, thick: float, pivot: Vector3, mat: Material) -> CarPart:
+func _panel_part(name: String, kind: String, grid: Array, normals: Array, thick: float, pivot: Vector3, mat: Material, extras: Array = []) -> CarPart:
 	var g2: Array = []
 	for row in grid:
 		var r2: Array = []
@@ -473,8 +497,12 @@ func _panel_part(name: String, kind: String, grid: Array, normals: Array, thick:
 			r2.append(pt - pivot)
 		g2.append(r2)
 	var d := MeshUtil.slab(g2, normals, thick)
+	MeshUtil.fixed(d)
+	for ex in extras:
+		var e2: Dictionary = MeshUtil.transform(ex, Transform3D(Basis.IDENTITY, -pivot))
+		MeshUtil.add(d, e2, e2.get("col", Color(0.08, 0.08, 0.08)))
 	var v: PackedVector3Array = d["v"]
-	var idx := MeshUtil.fix_winding(v, d["i"])
+	var idx: PackedInt32Array = d["i"]
 	var p := CarPart.new()
 	p.name = name
 	p.kind = kind
@@ -593,14 +621,25 @@ func _build_doors() -> void:
 				var nrow: Array = []
 				for c in cols:
 					var y: float = lerp(ylo, yhi, float(c) / (cols - 1))
-					row.append(Vector3(s * (side_x(sec, y) + 0.008), y, z_of(u)))
+					row.append(Vector3(s * (side_x(sec, y) + 0.012), y, z_of(u)))
 					nrow.append(Vector3(s, 0, 0))
 				grid.append(row)
 				nrm.append(nrow)
 			var pivot: Vector3 = grid[0][cols / 2]
 			var names := ["fl", "fr", "rl", "rr"]
 			var nm: String = names[di * 2 + (0 if s < 0 else 1)]
-			var p := _panel_part("door_" + nm, "door", grid, nrm, 0.035, pivot, door_mat)
+			# ручка двери у задней кромки, чуть ниже линии плеч
+			var extras: Array = []
+			if detail >= 1:
+				var hu: float = lerp(rg.y, rg.x, 0.8)
+				var hs := section(hu)
+				var hy: float = lerp(float(hs["y0"]), belt(hu), 0.78)
+				var hx: float = s * (side_x(hs, hy) + 0.03)
+				var hcol := Color(0.75, 0.76, 0.78) if spec.get("chrome", false) else Color(0.1, 0.1, 0.11)
+				var handle := MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(hx, hy, z_of(hu))), Vector3(0.03, 0.035, 0.18))
+				handle["col"] = hcol
+				extras.append(handle)
+			var p := _panel_part("door_" + nm, "door", grid, nrm, 0.035, pivot, door_mat, extras)
 			p.mass = 22.0
 			p.hinged = true
 			p.hinge_axis = Vector3.UP
@@ -661,6 +700,42 @@ func _build_bumper(front: bool) -> void:
 			idx.append_array([base, base + j, base + j + 1])
 	idx = MeshUtil.fix_winding(v, idx)
 	var mat: Material = CarMaterials.chrome() if spec.get("chrome", false) else (CarMaterials.plastic() if spec["body"] in ["suv3", "van", "truck", "pickup", "minivan"] else paint_mat)
+	var surfaces: Array = [{"i": idx, "mat": mat}]
+	var cols := PackedColorArray()
+	cols.resize(v.size())
+	cols.fill(Color.WHITE)
+	if detail >= 1:
+		# тёмные вставки: решётка воздухозаборника, накладка под номер, противотуманки
+		var ex := MeshUtil.empty()
+		var zf := outline_z(0.0, front)
+		var dz := -0.042 if front else 0.042
+		var sport: bool = spec["class"] == "Спорт" or spec.get("engine", "front") != "front"
+		var iw: float = W * (0.55 if sport else 0.4)
+		var ih: float = bh * (0.42 if sport else 0.3)
+		var iy: float = y0 + bh * 0.32
+		if front:
+			MeshUtil.add(ex, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(0, iy, zf + dz)), Vector3(iw, ih, 0.02)), Color(0.05, 0.05, 0.055))
+			for k in 3:
+				var sy := iy - ih * 0.3 + ih * 0.3 * k
+				MeshUtil.add(ex, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(0, sy, zf + dz * 1.12)), Vector3(iw * 0.96, 0.012, 0.012)), Color(0.18, 0.18, 0.19))
+			if sport:
+				for sx in [-1.0, 1.0]:
+					var xx: float = sx * W * 0.36
+					MeshUtil.add(ex, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(xx, iy, outline_z(xx, true) - 0.035)), Vector3(0.24, ih * 0.9, 0.02)), Color(0.05, 0.05, 0.055))
+		else:
+			# диффузор / нижняя накладка
+			MeshUtil.add(ex, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(0, y0 + 0.03, zf + dz)), Vector3(W * 0.7, 0.05, 0.02)), Color(0.06, 0.06, 0.065))
+			if sport:
+				for k in 4:
+					var fx := -W * 0.24 + W * 0.16 * k
+					MeshUtil.add(ex, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(fx, y0 + 0.05, zf + dz * 0.9)), Vector3(0.012, 0.08, 0.1)), Color(0.08, 0.08, 0.09))
+		var base := v.size()
+		v.append_array(ex["v"])
+		cols.append_array(ex["c"])
+		var ei := PackedInt32Array()
+		for k in (ex["i"] as PackedInt32Array):
+			ei.append(k + base)
+		surfaces.append({"i": ei, "mat": CarMaterials.trim()})
 	var p := CarPart.new()
 	p.name = "bumper_f" if front else "bumper_r"
 	p.kind = "bumper"
@@ -669,7 +744,7 @@ func _build_bumper(front: bool) -> void:
 	p.mass = 8.0 if L < 6.0 else 40.0
 	p.detach_at = 0.2
 	p.front = front
-	p.setup_mesh(v, [{"i": idx, "mat": mat}])
+	p.setup_mesh(v, surfaces, cols)
 	parts.append(p)
 
 
@@ -703,8 +778,25 @@ func _face_xf(x: float, y: float, front: bool, depth_off: float) -> Transform3D:
 	return Transform3D(b, Vector3(x, y, z + off))
 
 
+## Меш из уже выровненных примитивов (обход исправлен в MeshUtil.add)
+func _mesh(d: Dictionary, mat: Material) -> ArrayMesh:
+	var v: PackedVector3Array = d["v"]
+	var idx: PackedInt32Array = d["i"]
+	return MeshUtil.build_mesh(v, MeshUtil.normals(v, idx), [{"i": idx, "mat": mat}], d.get("c", PackedColorArray()))
+
+
+func _light_style() -> String:
+	if spec.get("round_lights", false):
+		return "round"
+	if spec["class"] == "Спорт" or spec["body"] in ["fastback", "supercar", "coupe"]:
+		return "slim"
+	if spec.get("boxy", false) or spec["body"] in ["bus", "truck", "van"]:
+		return "box"
+	return "modern"
+
+
 func _build_lights() -> void:
-	var round_l: bool = spec.get("round_lights", false)
+	var style := _light_style()
 	var sec_f := section(0.99)
 	var sec_r := section(0.01)
 	var hw := W * 0.5
@@ -713,55 +805,87 @@ func _build_lights() -> void:
 	var nose_y: float = sec_f["y1c"]
 	var hy: float = clamp(nose_y - 0.09, bump_top_f + 0.06, nose_y - 0.03)
 	var lx: float = clamp(hw - pr * 0.75 - 0.12, hw * 0.45, hw - 0.18)
-	var head_mesh: Mesh
-	if round_l:
-		var cm := CylinderMesh.new()
-		cm.top_radius = 0.085
-		cm.bottom_radius = 0.085
-		cm.height = 0.05
-		cm.radial_segments = 12
-		cm.rings = 1
-		head_mesh = cm
-	else:
-		var bm := BoxMesh.new()
-		bm.size = Vector3(0.3, 0.1, 0.05)
-		head_mesh = bm
 	var big: bool = spec["body"] in ["bus", "truck", "van"]
+	var k := 1.25 if big else 1.0
 	for s in [-1, 1]:
-		var xf := _face_xf(s * lx, hy, true, 0.01)
-		if round_l:
-			xf.basis = xf.basis * Basis(Vector3.RIGHT, PI * 0.5)
-		if big:
-			xf.basis = xf.basis.scaled(Vector3(1.2, 1.2, 1.2))
-		var p := _small_part("head_" + ("l" if s < 0 else "r"), "light", head_mesh, head_mat, xf, true)
+		var d := MeshUtil.empty()
+		match style:
+			"round":
+				# фара-«глаз»: линза и отражатель
+				MeshUtil.add(d, MeshUtil.ocyl(Transform3D(Basis(Vector3.UP, PI * 0.5), Vector3.ZERO), 0.085 * k, 0.05, 14))
+				if spec["body"] in ["sedan", "suv3"] and spec.get("boxy", false):
+					MeshUtil.add(d, MeshUtil.ocyl(Transform3D(Basis(Vector3.UP, PI * 0.5), Vector3(-s * 0.2, 0, 0)), 0.065, 0.05, 12))
+			"slim":
+				MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis(Vector3.BACK, s * 0.14), Vector3.ZERO), Vector3(0.38, 0.07, 0.05)))
+				# полоса ДХО
+				MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis(Vector3.BACK, s * 0.14), Vector3(s * 0.02, -0.052, 0.005)), Vector3(0.34, 0.014, 0.04)))
+			"box":
+				MeshUtil.add(d, MeshUtil.obox(Transform3D.IDENTITY, Vector3(0.3 * k, 0.13 * k, 0.05)))
+			_:
+				MeshUtil.add(d, MeshUtil.obox(Transform3D.IDENTITY, Vector3(0.32, 0.1, 0.05)))
+				MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(s * 0.03, -0.065, 0.004)), Vector3(0.26, 0.012, 0.04)))
+		var xf := _face_xf(s * lx, hy, true, 0.012)
+		var p := _small_part("head_" + ("l" if s < 0 else "r"), "light", _mesh(d, head_mat), head_mat, xf, true)
 		p.light_type = "head"
 		p.side = s
 		p.front = true
-	# решётка радиатора
-	if not spec.get("ev", false) and spec.get("engine", "front") == "front":
-		var gw: float = max(0.2, 2.0 * (lx - 0.2))
-		var gm := BoxMesh.new()
-		gm.size = Vector3(gw, 0.12, 0.04)
-		var gxf := Transform3D(Basis.IDENTITY, Vector3(0, hy - 0.01, outline_z(0, true) - 0.005))
-		_small_part("grille", "trim", gm, CarMaterials.chrome() if spec.get("chrome", false) else CarMaterials.plastic(), gxf)
-	# задние фонари
+	# задние фонари: основной блок + загиб на боковину
 	var tail_y: float = sec_r["y1c"] - 0.1
-	var tm := BoxMesh.new()
-	tm.size = Vector3(0.32 if not big else 0.25, 0.1, 0.05)
 	var tx: float = clamp(hw - pr * 0.6 - 0.14, hw * 0.45, hw - 0.16)
 	for s in [-1, 1]:
-		var xf := _face_xf(s * tx, tail_y, false, 0.01)
-		var p := _small_part("tail_" + ("l" if s < 0 else "r"), "light", tm, tail_mat, xf, true)
+		var xf := _face_xf(s * tx, tail_y, false, 0.012)
+		var d := MeshUtil.empty()
+		var tw := 0.25 if big else (0.4 if style == "slim" else 0.34)
+		var th := 0.16 if big else (0.08 if style == "slim" else 0.11)
+		MeshUtil.add(d, MeshUtil.obox(Transform3D.IDENTITY, Vector3(tw, th, 0.05)))
+		if not big and detail >= 1:
+			# загиб на бок кузова
+			var cz := L * 0.5 - pr * 0.35 - 0.05
+			var cw := Vector3(s * (half_w(u_of(cz)) + 0.004), tail_y, cz)
+			var local := xf.affine_inverse() * cw
+			MeshUtil.add(d, MeshUtil.obox(Transform3D(xf.basis.inverse(), local), Vector3(0.03, th, 0.16)))
+			# фонарь заднего хода — светлая вставка
+		var p := _small_part("tail_" + ("l" if s < 0 else "r"), "light", _mesh(d, tail_mat), tail_mat, xf, true)
 		p.light_type = "tail"
 		p.side = s
 		p.front = false
-	# номера
+	# номера с текстом
 	var plm := BoxMesh.new()
 	plm.size = Vector3(0.52, 0.11, 0.02)
+	var number := _plate_number()
 	var bf_y: float = sec_f["y0"] + 0.1
-	_small_part("plate_f", "trim", plm, CarMaterials.plate(), Transform3D(Basis.IDENTITY, Vector3(0, bf_y, outline_z(0, true) - 0.05)), true)
+	var pf := _small_part("plate_f", "trim", plm, CarMaterials.plate(), Transform3D(Basis.IDENTITY, Vector3(0, bf_y, outline_z(0, true) - 0.05)), true)
+	_plate_label(pf, number, true)
 	var br_y: float = max(float(sec_r["y0"]) + 0.12, tail_y - 0.2)
-	_small_part("plate_r", "trim", plm, CarMaterials.plate(), Transform3D(Basis.IDENTITY, Vector3(0, br_y, outline_z(0, false) + 0.03)), true)
+	var prr := _small_part("plate_r", "trim", plm, CarMaterials.plate(), Transform3D(Basis.IDENTITY, Vector3(0, br_y, outline_z(0, false) + 0.03)), true)
+	_plate_label(prr, number, false)
+
+
+func _plate_number() -> String:
+	var letters := "АВЕКМНОРСТУХ"
+	var r := RandomNumberGenerator.new()
+	r.randomize()
+	var l := func(): return letters[r.randi() % letters.length()]
+	return "%s %03d %s%s  %d" % [l.call(), r.randi_range(1, 999), l.call(), l.call(), [77, 78, 50, 99, 197, 750, 16, 66][r.randi() % 8]]
+
+
+func _plate_label(p: CarPart, number: String, front: bool) -> void:
+	if detail < 1:
+		return
+	var lb := Label3D.new()
+	lb.text = number
+	lb.font_size = 48
+	lb.pixel_size = 0.0016
+	lb.modulate = Color(0.05, 0.05, 0.06)
+	lb.outline_size = 0
+	lb.shaded = false
+	lb.double_sided = false
+	lb.no_depth_test = false
+	lb.visibility_range_end = 25.0
+	lb.position = Vector3(0, 0, -0.012 if front else 0.012)
+	if front:
+		lb.rotation.y = PI
+	p.node.add_child(lb)
 
 
 func _build_mirrors() -> void:
@@ -770,11 +894,20 @@ func _build_mirrors() -> void:
 		u = u_of(axles_z[0] + wr) - 0.02
 	var sec := section(u)
 	var y: float = belt(u) + 0.08
-	var mm := BoxMesh.new()
-	mm.size = Vector3(0.14, 0.11, 0.07) if L < 6.0 else Vector3(0.12, 0.35, 0.08)
+	var truck := L >= 6.0
 	for s in [-1, 1]:
-		var xf := Transform3D(Basis.IDENTITY, Vector3(s * (float(sec["hw"]) + 0.08), y, z_of(u)))
-		var p := _small_part("mirror_" + ("l" if s < 0 else "r"), "mirror", mm, paint_mat, xf, true)
+		var d := MeshUtil.empty()
+		if truck:
+			MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(s * 0.12, 0.1, 0)), Vector3(0.12, 0.38, 0.08)), Color.WHITE)
+			MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(s * 0.12, 0.1, 0.043)), Vector3(0.1, 0.34, 0.01)), Color(0.35, 0.37, 0.4))
+			MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(s * 0.04, 0.0, 0)), Vector3(0.16, 0.03, 0.03)), Color(0.08, 0.08, 0.08))
+		else:
+			# корпус зеркала, стекло и кронштейн
+			MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis(Vector3.UP, -s * 0.12), Vector3(s * 0.06, 0.02, 0)), Vector3(0.17, 0.11, 0.08)), Color.WHITE)
+			MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis(Vector3.UP, -s * 0.12), Vector3(s * 0.06, 0.02, 0.042)), Vector3(0.15, 0.09, 0.01)), Color(0.35, 0.37, 0.4))
+			MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(-s * 0.03, -0.02, 0.01)), Vector3(0.08, 0.04, 0.05)), Color(0.08, 0.08, 0.08))
+		var xf := Transform3D(Basis.IDENTITY, Vector3(s * (float(sec["hw"]) + 0.07), y, z_of(u)))
+		var p := _small_part("mirror_" + ("l" if s < 0 else "r"), "mirror", _mesh(d, paint_mat), paint_mat, xf, true)
 		p.side = s
 		p.mass = 1.0
 
@@ -784,52 +917,57 @@ func _build_extras() -> void:
 	var roof_u: float = (float(t["roof_r"]) + float(t["roof_f"])) * 0.5
 	match spec.get("extra", ""):
 		"police":
-			var bm := BoxMesh.new()
-			bm.size = Vector3(0.5, 0.1, 0.22)
 			var red := CarMaterials.beacon(Color(1.0, 0.05, 0.05))
 			var blue := CarMaterials.beacon(Color(0.1, 0.25, 1.0))
-			var pl := _small_part("beacon_l", "beacon", bm, red, Transform3D(Basis.IDENTITY, Vector3(-0.27, roof_y + 0.07, z_of(roof_u))), true)
-			var prr := _small_part("beacon_r", "beacon", bm, blue, Transform3D(Basis.IDENTITY, Vector3(0.27, roof_y + 0.07, z_of(roof_u))), true)
+			# основание люстры + два колпака
+			var base := MeshUtil.empty()
+			MeshUtil.add(base, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(0, -0.03, 0)), Vector3(1.2, 0.05, 0.26)), Color(0.1, 0.1, 0.11))
+			for sx in [-0.55, 0.55]:
+				MeshUtil.add(base, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(sx, -0.07, 0)), Vector3(0.05, 0.06, 0.2)), Color(0.1, 0.1, 0.11))
+			_small_part("lightbar", "trim", _mesh(base, CarMaterials.trim()), CarMaterials.trim(), Transform3D(Basis.IDENTITY, Vector3(0, roof_y + 0.07, z_of(roof_u))), true)
+			var bm := BoxMesh.new()
+			bm.size = Vector3(0.5, 0.1, 0.22)
+			var pl := _small_part("beacon_l", "beacon", bm, red, Transform3D(Basis.IDENTITY, Vector3(-0.28, roof_y + 0.1, z_of(roof_u))), true)
+			var prr := _small_part("beacon_r", "beacon", bm, blue, Transform3D(Basis.IDENTITY, Vector3(0.28, roof_y + 0.1, z_of(roof_u))), true)
 			pl.side = -1
 			prr.side = 1
 		"taxi":
 			var tm := BoxMesh.new()
 			tm.size = Vector3(0.55, 0.16, 0.16)
 			var ym := CarMaterials.beacon(Color(1.0, 0.8, 0.2))
-			_small_part("taxi_sign", "beacon", tm, ym, Transform3D(Basis.IDENTITY, Vector3(0, roof_y + 0.1, z_of(roof_u))), true)
+			var tp := _small_part("taxi_sign", "beacon", tm, ym, Transform3D(Basis.IDENTITY, Vector3(0, roof_y + 0.1, z_of(roof_u))), true)
+			if detail >= 1:
+				for side in [-1.0, 1.0]:
+					var lb := Label3D.new()
+					lb.text = "ТАКСИ"
+					lb.font_size = 40
+					lb.pixel_size = 0.0022
+					lb.modulate = Color(0.1, 0.08, 0.02)
+					lb.shaded = false
+					lb.position = Vector3(0, 0, side * 0.082)
+					lb.rotation.y = 0.0 if side > 0 else PI
+					lb.visibility_range_end = 40.0
+					tp.node.add_child(lb)
 	var sp: String = spec.get("spoiler", "")
 	if sp != "":
 		var u := 0.04
 		var sec := section(u)
 		var y: float = sec["y1c"]
-		var wm := BoxMesh.new()
+		var d := MeshUtil.empty()
 		var xf := Transform3D(Basis.IDENTITY, Vector3(0, y, z_of(u)))
 		match sp:
 			"wing":
-				wm.size = Vector3(W * 0.82, 0.035, 0.26)
-				xf.origin.y += 0.24
-				var post := BoxMesh.new()
-				post.size = Vector3(0.04, 0.24, 0.12)
-				for s in [-1, 1]:
-					_small_part("wing_post", "spoiler", post, CarMaterials.plastic(), Transform3D(Basis.IDENTITY, Vector3(s * W * 0.3, y + 0.12, z_of(u))), true)
+				# крыло, стойки и боковые пластины
+				MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis(Vector3.RIGHT, 0.08), Vector3(0, 0.25, 0)), Vector3(W * 0.84, 0.03, 0.27)), Color.WHITE)
+				for sx in [-1.0, 1.0]:
+					MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(sx * W * 0.3, 0.12, 0.02)), Vector3(0.04, 0.24, 0.12)), Color(0.08, 0.08, 0.09))
+					MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(sx * W * 0.42, 0.25, 0)), Vector3(0.012, 0.1, 0.3)), Color.WHITE)
 			"ducktail":
-				wm.size = Vector3(W * 0.7, 0.05, 0.22)
-				xf.origin.y += 0.04
-				xf.basis = Basis(Vector3.RIGHT, -0.15)
+				MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis(Vector3.RIGHT, -0.15), Vector3(0, 0.04, 0)), Vector3(W * 0.7, 0.05, 0.22)), Color.WHITE)
 			_:
-				wm.size = Vector3(W * 0.78, 0.03, 0.08)
-				xf.origin.y += 0.015
-		var p := _small_part("spoiler", "spoiler", wm, paint_mat, xf, true)
+				MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis.IDENTITY, Vector3(0, 0.015, 0)), Vector3(W * 0.78, 0.03, 0.08)), Color.WHITE)
+		var p := _small_part("spoiler", "spoiler", _mesh(d, paint_mat), paint_mat, xf, true)
 		p.mass = 5.0
-	# выхлопная труба
-	var em := CylinderMesh.new()
-	em.top_radius = 0.035
-	em.bottom_radius = 0.035
-	em.height = 0.18
-	em.radial_segments = 8
-	var ex_x := W * 0.3
-	var exf := Transform3D(Basis(Vector3.RIGHT, PI * 0.5), Vector3(ex_x, clr + 0.07, outline_z(ex_x, false) - 0.03))
-	_small_part("exhaust", "trim", em, CarMaterials.chrome(), exf, true)
 
 
 func _build_bed() -> void:
@@ -875,38 +1013,154 @@ func _build_cargo() -> void:
 # ---------------------------------------------------------------- колёса
 
 static var _tire_mesh: ArrayMesh
-static var _rim_mesh: ArrayMesh
+static var _rim_meshes := {}
+static var _disc_mesh: ArrayMesh
 
 
+## Шина: закруглённое плечо, боковина и три продольные канавки протектора
 static func tire_mesh() -> ArrayMesh:
 	if _tire_mesh == null:
-		_tire_mesh = MeshUtil.simple_mesh(MeshUtil.cylinder_x(18, 0.28), CarMaterials.tire())
+		var prof: Array = [[-0.5, 0.68], [-0.5, 0.82], [-0.485, 0.91], [-0.44, 0.965], [-0.37, 1.0]]
+		for gc in [-0.19, 0.0, 0.19]:
+			prof.append([gc - 0.035, 1.0])
+			prof.append([gc - 0.025, 0.965])
+			prof.append([gc + 0.025, 0.965])
+			prof.append([gc + 0.035, 1.0])
+		prof.append_array([[0.37, 1.0], [0.44, 0.965], [0.485, 0.91], [0.5, 0.82], [0.5, 0.68]])
+		var rings: Array = []
+		var zs := PackedFloat32Array()
+		for pr in prof:
+			var ring := PackedVector2Array()
+			for k in 22:
+				var a := TAU * k / 22.0
+				ring.append(Vector2(cos(a), sin(a)) * float(pr[1]))
+			rings.append(ring)
+			zs.append(pr[0])
+		# внутренний край боковины уходит под обод — торцы не нужны
+		prof_inner(rings, zs)
+		var d := MeshUtil.loft(rings, zs, true, false, false)
+		d = MeshUtil.transform(d, Transform3D(Basis(Vector3(0, 0, -1), Vector3(0, 1, 0), Vector3(1, 0, 0)), Vector3.ZERO))
+		_tire_mesh = MeshUtil.simple_mesh(d, CarMaterials.tire())
 	return _tire_mesh
 
 
-static func rim_mesh() -> ArrayMesh:
-	if _rim_mesh == null:
-		var d := MeshUtil.cylinder_x(14, 0.0)
-		d = MeshUtil.transform(d, Transform3D(Basis.IDENTITY.scaled(Vector3(0.9, 0.66, 0.66)), Vector3(0.06, 0, 0)))
-		d["c"] = PackedColorArray()
-		for k in (d["v"] as PackedVector3Array).size():
-			(d["c"] as PackedColorArray).append(Color.WHITE)
-		# спицы
-		for s in 5:
-			var a := TAU * s / 5.0
-			var sp := MeshUtil.box(Vector3(0.12, 0.62, 0.14), Vector3(0.52, 0.31, 0), Vector3i(1, 1, 1))
-			sp = MeshUtil.transform(sp, Transform3D(Basis(Vector3.RIGHT, a), Vector3.ZERO))
-			MeshUtil.append(d, sp)
-		var hub := MeshUtil.transform(MeshUtil.cylinder_x(10, 0.0), Transform3D(Basis.IDENTITY.scaled(Vector3(0.14, 0.2, 0.2)), Vector3(0.55, 0, 0)))
-		MeshUtil.append(d, hub)
-		_rim_mesh = MeshUtil.simple_mesh(d, CarMaterials.rim())
-	return _rim_mesh
+## Замыкаем профиль шины изнутри (внутренняя стенка), чтобы лофт был «тором»
+static func prof_inner(rings: Array, zs: PackedFloat32Array) -> void:
+	var r_in := 0.665
+	var last: PackedVector2Array = rings[rings.size() - 1]
+	var first: PackedVector2Array = rings[0]
+	var ring_a := PackedVector2Array()
+	var ring_b := PackedVector2Array()
+	for k in last.size():
+		ring_a.append(last[k].normalized() * r_in)
+		ring_b.append(first[k].normalized() * r_in)
+	rings.append(ring_a)
+	zs.append(zs[zs.size() - 1] - 0.02)
+	rings.append(ring_b)
+	zs.append(zs[0] + 0.02)
+	rings.append(first)
+	zs.append(zs[0])
+
+
+static func _ring_tube(radius: float, x: float, prof: PackedVector2Array, seg: int) -> Dictionary:
+	var pts := PackedVector3Array()
+	var a := PackedVector3Array()
+	var b := PackedVector3Array()
+	for k in seg + 1:
+		var ang := TAU * k / seg
+		var rd := Vector3(0, cos(ang), sin(ang))
+		pts.append(Vector3(x, 0, 0) + rd * radius)
+		a.append(Vector3(1, 0, 0))
+		b.append(rd)
+	return MeshUtil.tube(pts, a, b, prof, false)
+
+
+## Диск колеса: «sport5» — пять сдвоенных спиц, «multi» — десять тонких,
+## «steel» — штампованный. Ось — X, внешняя сторона — +X, радиус 1.
+static func rim_mesh(style: String) -> ArrayMesh:
+	if _rim_meshes.has(style):
+		return _rim_meshes[style]
+	var d := MeshUtil.empty()
+	# обод
+	# открытая труба обода (без торцов — иначе закроет спицы)
+	var bpts := PackedVector3Array([Vector3(-0.41, 0, 0), Vector3(0.45, 0, 0)])
+	var bprof := PackedVector2Array()
+	for k in 18:
+		var ang := TAU * k / 18.0
+		bprof.append(Vector2(cos(ang), sin(ang)) * 0.64)
+	var barrel := MeshUtil.tube(bpts, PackedVector3Array([Vector3.UP, Vector3.UP]), PackedVector3Array([Vector3.BACK, Vector3.BACK]), bprof, false)
+	# труба открыта: делаем её двусторонней, добавив обратные грани
+	var bi: PackedInt32Array = barrel["i"]
+	var n0 := bi.size()
+	for k in range(0, n0, 3):
+		bi.append_array([bi[k], bi[k + 2], bi[k + 1]])
+	barrel["i"] = bi
+	MeshUtil.colorize(barrel, Color(0.55, 0.55, 0.57))
+	MeshUtil.append(d, barrel)
+	# закраина обода
+	MeshUtil.add(d, _ring_tube(0.655, 0.49, MeshUtil.rect_profile(0.05, 0.04), 24))
+	match style:
+		"steel":
+			MeshUtil.add(d, MeshUtil.ocyl(Transform3D(Basis.IDENTITY, Vector3(0.44, 0, 0)), 0.64, 0.04, 18))
+			# рёбра жёсткости и «окна»
+			for k in 8:
+				var ang := TAU * k / 8.0
+				var rd := Vector3(0, cos(ang), sin(ang))
+				MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis(Vector3.RIGHT, ang), Vector3(0.47, 0, 0) + rd * 0.42), Vector3(0.03, 0.08, 0.12)))
+			MeshUtil.add(d, MeshUtil.ocyl(Transform3D(Basis.IDENTITY, Vector3(0.48, 0, 0)), 0.26, 0.06, 14))
+		"multi":
+			for k in 10:
+				var ang := TAU * k / 10.0
+				MeshUtil.add(d, MeshUtil.obox(Transform3D(Basis(Vector3.RIGHT, ang), Vector3(0.48, 0.4, 0)), Vector3(0.05, 0.52, 0.06)))
+			MeshUtil.add(d, MeshUtil.ocyl(Transform3D(Basis.IDENTITY, Vector3(0.49, 0, 0)), 0.17, 0.07, 12))
+		_:
+			for k in 5:
+				var ang := TAU * k / 5.0
+				for sgn in [-1.0, 1.0]:
+					var bas := Basis(Vector3.RIGHT, ang) * Basis(Vector3.RIGHT, sgn * 0.09)
+					MeshUtil.add(d, MeshUtil.obox(Transform3D(bas, bas * Vector3(0, 0.4, 0) + Vector3(0.485, 0, 0)), Vector3(0.05, 0.5, 0.08)))
+			MeshUtil.add(d, MeshUtil.ocyl(Transform3D(Basis.IDENTITY, Vector3(0.49, 0, 0)), 0.18, 0.07, 12))
+	# гайки
+	for k in 5:
+		var ang := TAU * k / 5.0
+		MeshUtil.add(d, MeshUtil.ocyl(Transform3D(Basis.IDENTITY, Vector3(0.525, cos(ang) * 0.1, sin(ang) * 0.1)), 0.022, 0.04, 6))
+	var v: PackedVector3Array = d["v"]
+	var idx: PackedInt32Array = d["i"]
+	var m := MeshUtil.build_mesh(v, MeshUtil.normals(v, idx), [{"i": idx, "mat": CarMaterials.rim()}])
+	_rim_meshes[style] = m
+	return m
+
+
+static func disc_mesh() -> ArrayMesh:
+	if _disc_mesh == null:
+		var d := MeshUtil.empty()
+		MeshUtil.add(d, MeshUtil.ocyl(Transform3D(Basis.IDENTITY, Vector3(0.1, 0, 0)), 0.52, 0.09, 18))
+		MeshUtil.add(d, MeshUtil.ocyl(Transform3D(Basis.IDENTITY, Vector3(0.16, 0, 0)), 0.22, 0.12, 12))
+		var v: PackedVector3Array = d["v"]
+		var idx: PackedInt32Array = d["i"]
+		_disc_mesh = MeshUtil.build_mesh(v, MeshUtil.normals(v, idx), [{"i": idx, "mat": CarMaterials.brake_disc()}])
+	return _disc_mesh
+
+
+func _pick_rim() -> Array:
+	# стиль диска и материал по характеру машины
+	var h: int = abs(hash(spec["id"]))
+	if spec["class"] in ["Коммерческие", "Тяжёлые"] or spec["body"] in ["minivan", "suv3"]:
+		return ["steel", CarMaterials.rim_steel()]
+	if spec.get("boxy", false):
+		return ["steel", CarMaterials.rim()]
+	if spec["class"] == "Спорт":
+		return ["sport5" if h % 2 == 0 else "multi", CarMaterials.rim_dark() if h % 3 == 0 else CarMaterials.rim()]
+	return ["multi" if h % 2 == 0 else "sport5", CarMaterials.rim()]
 
 
 func _build_wheels() -> Array:
 	var wheels: Array = []
 	var x_off := W * 0.5 - ww * 0.5 - (0.05 if L > 6.0 else 0.015)
-	var rim_mat := CarMaterials.rim_dark() if spec["class"] == "Спорт" and randf() < 0.5 else CarMaterials.rim()
+	var rp := _pick_rim()
+	rim_style = rp[0]
+	var rim_mat: Material = rp[1]
+	var sport: bool = spec["class"] == "Спорт"
 	for ai in axles_z.size():
 		var z: float = axles_z[ai]
 		for s in [-1, 1]:
@@ -922,10 +1176,26 @@ func _build_wheels() -> Array:
 			tire.scale = Vector3(ww * s, wr, wr)
 			spin.add_child(tire)
 			var rim := MeshInstance3D.new()
-			rim.mesh = rim_mesh()
+			rim.mesh = rim_mesh(rim_style)
 			rim.material_override = rim_mat
 			rim.scale = Vector3(ww * s, wr, wr)
 			spin.add_child(rim)
+			if detail >= 2 and rim_style != "steel":
+				# тормозной диск (вращается) и суппорт (неподвижен)
+				var disc := MeshInstance3D.new()
+				disc.mesh = disc_mesh()
+				disc.scale = Vector3(ww * s, wr, wr)
+				disc.visibility_range_end = 45.0
+				spin.add_child(disc)
+				var cal := MeshInstance3D.new()
+				var cm := BoxMesh.new()
+				cm.size = Vector3(ww * 0.28, wr * 0.34, wr * 0.2)
+				cal.mesh = cm
+				cal.material_override = CarMaterials.caliper(sport)
+				cal.position = Vector3(s * ww * 0.12, wr * 0.36, wr * 0.2)
+				cal.rotation.x = -0.5
+				cal.visibility_range_end = 45.0
+				pivot.add_child(cal)
 			var p := CarPart.new()
 			p.name = pivot.name
 			p.kind = "wheel"

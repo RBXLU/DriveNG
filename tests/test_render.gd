@@ -11,6 +11,8 @@ func _ready() -> void:
 	var ids: Array = ["vostok_2107", "kaiser_golfer", "hayato_landmaster", "bellini_furia", "liberty_interceptor", "gazel"]
 	var tod := 0
 	for a in args:
+		if a.begins_with("q="):
+			Settings.apply_preset(int(a.substr(2)), false)
 		if a.begins_with("cars="):
 			ids = a.substr(5).split(",")
 		if a.begins_with("tod="):
@@ -38,7 +40,7 @@ func _ready() -> void:
 		car.global_position = Vector3(x, 0, 0)
 		car.rotation.y = 0.5 + PI
 		cars.append(car)
-		if i % 2 == 1:
+		if i % 2 == 1 and not args.has("nodmg"):
 			# удар спереди-слева
 			var L: float = spec["L"]
 			car.damage.dent(Vector3(-0.4, 0.6, -L * 0.5), Vector3(0.3, 0, 1).normalized(), 0.45, 0.9)
@@ -53,6 +55,10 @@ func _ready() -> void:
 	add_child(cam)
 	cam.fov = 60
 	cam.global_position = Vector3(0, 3.2, 9.5)
+	for a in args:
+		if a.begins_with("campos="):
+			var c := a.substr(7).split(",")
+			cam.global_position = Vector3(float(c[0]), float(c[1]), float(c[2]))
 	cam.look_at(Vector3(0, 0.6, 0))
 
 func _process(_d: float) -> void:

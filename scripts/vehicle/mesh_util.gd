@@ -97,26 +97,42 @@ static func slab(grid: Array, normals: Array, thick: float) -> Dictionary:
 	var v := PackedVector3Array()
 	var col := PackedColorArray()
 	var idx := PackedInt32Array()
-	# внешняя сетка
+	var center := Vector3.ZERO
 	for r in rows:
 		for c in cols:
 			v.append(grid[r][c])
 			col.append(Color.WHITE)
+			center += grid[r][c]
+	center /= rows * cols
+	var avg_n := Vector3.ZERO
+	for r in rows:
+		for c in cols:
+			avg_n += normals[r][c]
+	avg_n = avg_n.normalized()
 	var inner := v.size()
 	for r in rows:
 		for c in cols:
 			v.append(grid[r][c] - normals[r][c] * thick)
 			col.append(Color(0.35, 0.35, 0.35))
+	# каждая грань ориентируется явно по желаемой нормали (Godot: по часовой снаружи)
+	var tri := func(a: int, b: int, c: int, want: Vector3) -> void:
+		var fn := (v[c] - v[a]).cross(v[b] - v[a])
+		if fn.dot(want) < 0.0:
+			idx.append_array([a, c, b])
+		else:
+			idx.append_array([a, b, c])
 	for r in rows - 1:
 		for c in cols - 1:
 			var a := r * cols + c
 			var b := a + 1
 			var cc := a + cols + 1
 			var d := a + cols
-			idx.append_array([a, b, cc, a, cc, d])
-			idx.append_array([inner + a, inner + cc, inner + b, inner + a, inner + d, inner + cc])
+			var nn: Vector3 = normals[r][c]
+			tri.call(a, b, cc, nn)
+			tri.call(a, cc, d, nn)
+			tri.call(inner + a, inner + b, inner + cc, -nn)
+			tri.call(inner + a, inner + cc, inner + d, -nn)
 	# кромки (отдельные вершины, тёмные — видимый шов панели)
-	var edge_loops := []
 	var loop: Array = []
 	for c in cols:
 		loop.append(Vector2i(0, c))
@@ -126,7 +142,6 @@ static func slab(grid: Array, normals: Array, thick: float) -> Dictionary:
 		loop.append(Vector2i(rows - 1, c))
 	for r in range(rows - 2, 0, -1):
 		loop.append(Vector2i(r, 0))
-	edge_loops.append(loop)
 	var ln := loop.size()
 	var eb := v.size()
 	for p in loop:
@@ -141,8 +156,12 @@ static func slab(grid: Array, normals: Array, thick: float) -> Dictionary:
 		var b := eb + j2
 		var cc := eb + ln + j2
 		var d := eb + ln + j
-		idx.append_array([a, b, cc, a, cc, d])
-	return {"v": v, "i": idx, "c": col}
+		var mid := (v[a] + v[b]) * 0.5
+		var out := mid - center
+		out -= avg_n * out.dot(avg_n)
+		tri.call(a, b, cc, out)
+		tri.call(a, cc, d, out)
+	return {"v": v, "i": idx, "c": col, "oriented": true}
 
 
 ## Знаковый объём (для CCW-наружу положителен)
@@ -277,3 +296,71 @@ static func simple_mesh(d: Dictionary, mat: Material) -> ArrayMesh:
 	var n := normals(v, idx)
 	var cols: PackedColorArray = d.get("c", PackedColorArray())
 	return build_mesh(v, n, [{"i": idx, "mat": mat}], cols)
+
+
+# ---------------------------------------------------------------- помощники деталей
+
+## Повернутый/смещённый параллелепипед (1 сегмент)
+static func obox(xf: Transform3D, size: Vector3) -> Dictionary:
+	return transform(box(size, Vector3.ZERO, Vector3i(1, 1, 1)), xf)
+
+
+## Цилиндр вдоль оси X с радиусом r и длиной w, преобразованный xf
+static func ocyl(xf: Transform3D, r: float, w: float, seg: int = 10) -> Dictionary:
+	var d := cylinder_x(seg, 0.0)
+	return transform(d, xf * Transform3D(Basis.IDENTITY.scaled(Vector3(w, r, r)), Vector3.ZERO))
+
+
+## Труба с профилем вдоль ломаной. a[i], b[i] — оси профиля в точке i.
+static func tube(pts: PackedVector3Array, a: PackedVector3Array, b: PackedVector3Array, profile: PackedVector2Array, caps: bool = true) -> Dictionary:
+	var v := PackedVector3Array()
+	var idx := PackedInt32Array()
+	var pn := profile.size()
+	for i in pts.size():
+		for pr in profile:
+			v.append(pts[i] + a[i] * pr.x + b[i] * pr.y)
+	for i in pts.size() - 1:
+		for j in pn:
+			var j2 := (j + 1) % pn
+			idx.append_array([i * pn + j, i * pn + j2, (i + 1) * pn + j2, i * pn + j, (i + 1) * pn + j2, (i + 1) * pn + j])
+	if caps:
+		for e in [0, pts.size() - 1]:
+			var base: int = e * pn
+			for j in range(1, pn - 1):
+				idx.append_array([base, base + j, base + j + 1])
+	return {"v": v, "i": idx}
+
+
+## Прямоугольный профиль со скруглением (для труб)
+static func rect_profile(w: float, h: float) -> PackedVector2Array:
+	var x := w * 0.5
+	var y := h * 0.5
+	var c: float = min(w, h) * 0.25
+	return PackedVector2Array([Vector2(-x + c, -y), Vector2(x - c, -y), Vector2(x, -y + c), Vector2(x, y - c), Vector2(x - c, y), Vector2(-x + c, y), Vector2(-x, y - c), Vector2(-x, -y + c)])
+
+
+static func colorize(d: Dictionary, c: Color) -> Dictionary:
+	var cols := PackedColorArray()
+	cols.resize((d["v"] as PackedVector3Array).size())
+	cols.fill(c)
+	d["c"] = cols
+	return d
+
+
+## Выравнивает обход отдельного замкнутого примитива (перед объединением)
+static func fixed(d: Dictionary) -> Dictionary:
+	if not d.get("oriented", false):
+		d["i"] = fix_winding(d["v"], d["i"])
+	return d
+
+
+static func empty() -> Dictionary:
+	return {"v": PackedVector3Array(), "i": PackedInt32Array(), "c": PackedColorArray()}
+
+
+## Добавить примитив с выравниванием обхода и цветом
+static func add(dst: Dictionary, src: Dictionary, c: Color = Color.WHITE) -> void:
+	fixed(src)
+	if not src.has("c"):
+		colorize(src, c)
+	append(dst, src)

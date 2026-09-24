@@ -5,6 +5,7 @@ extends RefCounted
 
 const PAINT_SHADER := preload("res://shaders/car_paint.gdshader")
 const GLASS_SHADER := preload("res://shaders/car_glass.gdshader")
+const GLASS_CLEAR_SHADER := preload("res://shaders/car_glass_clear.gdshader")
 
 static var _cache := {}
 
@@ -25,17 +26,24 @@ static func _cached(key: String, maker: Callable) -> Material:
 	return _cache[key]
 
 
+## На высоком качестве стекло полупрозрачное (виден салон), иначе — непрозрачное
+static func _clear_glass() -> bool:
+	return int(Settings.get_v("quality_level")) >= 3
+
+
 static func glass() -> Material:
-	return _cached("glass", func():
+	var clear := _clear_glass()
+	return _cached("glass_%s" % clear, func():
 		var m := ShaderMaterial.new()
-		m.shader = GLASS_SHADER
+		m.shader = GLASS_CLEAR_SHADER if clear else GLASS_SHADER
 		return m)
 
 
 static func glass_broken() -> Material:
-	return _cached("glass_broken", func():
+	var clear := _clear_glass()
+	return _cached("glass_broken_%s" % clear, func():
 		var m := ShaderMaterial.new()
-		m.shader = GLASS_SHADER
+		m.shader = GLASS_CLEAR_SHADER if clear else GLASS_SHADER
 		m.set_shader_parameter("broken", 1.0)
 		return m)
 
@@ -71,7 +79,7 @@ static func tire() -> Material:
 
 
 static func rim() -> Material:
-	return std("rim", Color(0.7, 0.71, 0.74), 0.85, 0.28)
+	return std("rim", Color(0.82, 0.83, 0.86), 0.75, 0.3)
 
 
 static func rim_dark() -> Material:
@@ -115,3 +123,46 @@ static func beacon(color: Color) -> StandardMaterial3D:
 	m.emission = color
 	m.emission_energy_multiplier = 0.2
 	return m
+
+
+## Материал с цветом из вершин (молдинги, решётки, салон)
+static func trim() -> StandardMaterial3D:
+	return _cached("trim", func():
+		var m := StandardMaterial3D.new()
+		m.vertex_color_use_as_albedo = true
+		m.albedo_color = Color.WHITE
+		m.roughness = 0.45
+		m.metallic = 0.15
+		return m)
+
+
+static func trim_chrome() -> StandardMaterial3D:
+	return _cached("trim_chrome", func():
+		var m := StandardMaterial3D.new()
+		m.vertex_color_use_as_albedo = true
+		m.albedo_color = Color.WHITE
+		m.roughness = 0.12
+		m.metallic = 1.0
+		return m)
+
+
+static func interior() -> StandardMaterial3D:
+	return _cached("interior", func():
+		var m := StandardMaterial3D.new()
+		m.vertex_color_use_as_albedo = true
+		m.roughness = 0.85
+		return m)
+
+
+static func rim_steel() -> Material:
+	return std("rim_steel", Color(0.32, 0.33, 0.35), 0.6, 0.45)
+
+
+static func brake_disc() -> Material:
+	return std("brake_disc", Color(0.38, 0.38, 0.4), 0.9, 0.35)
+
+
+static func caliper(sport: bool) -> Material:
+	if sport:
+		return std("caliper_red", Color(0.75, 0.06, 0.04), 0.2, 0.35)
+	return std("caliper", Color(0.2, 0.2, 0.22), 0.5, 0.5)
