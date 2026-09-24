@@ -48,6 +48,9 @@ func _ready() -> void:
 	load_settings()
 	if int(data["quality_level"]) < 0:
 		apply_preset(detect_quality(), false)
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("quality="):
+			apply_preset(int(a.substr(8)), false)
 	save_settings()
 
 

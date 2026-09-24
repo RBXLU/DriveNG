@@ -14,6 +14,8 @@ var hint_label: Label
 var derby_label: Label
 var _dmg_t := 0.0
 var _hint_t := 14.0
+var _last_msg := ""
+var _last_msg_t := 0
 
 
 class Gauge extends Control:
@@ -235,13 +237,22 @@ func set_car(c: Car) -> void:
 
 
 func show_message(text: String) -> void:
+	# одинаковые сообщения подряд не дублируем
+	var now := Time.get_ticks_msec()
+	if text == _last_msg and now - _last_msg_t < 1500:
+		return
+	_last_msg = text
+	_last_msg_t = now
 	var l := UIKit.label(text, 24, Color.WHITE, HORIZONTAL_ALIGNMENT_CENTER)
 	l.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
 	l.add_theme_constant_override("outline_size", 6)
 	msg_box.add_child(l)
+	# queue_free удаляет узел только в конце кадра — сначала отцепляем, иначе цикл вечный
 	while msg_box.get_child_count() > 4:
-		msg_box.get_child(0).queue_free()
-	var tw := create_tween()
+		var old := msg_box.get_child(0)
+		msg_box.remove_child(old)
+		old.queue_free()
+	var tw := l.create_tween()
 	tw.tween_interval(2.2)
 	tw.tween_property(l, "modulate:a", 0.0, 0.8)
 	tw.tween_callback(l.queue_free)

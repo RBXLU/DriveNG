@@ -306,7 +306,7 @@ func _process(delta: float) -> void:
 	# удаляем лишние
 	for c in _cars_audio.keys():
 		if not want.has(c) or not is_instance_valid(c):
-			var ca: Node = _cars_audio[c]
+			var ca = _cars_audio[c]
 			if is_instance_valid(ca):
 				ca.queue_free()
 			_cars_audio.erase(c)

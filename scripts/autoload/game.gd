@@ -31,6 +31,12 @@ var debris_root: Node3D = null
 var debris: Array[RigidBody3D] = []
 var slowmo_levels := [1.0, 0.5, 0.25, 0.1]
 var slowmo_index := 0
+var trace := OS.get_cmdline_user_args().has("trace=1")
+
+
+func tr_log(msg: String) -> void:
+	if trace:
+		print("T ", Time.get_ticks_msec(), " ", msg)
 
 
 func register_car(c: Car) -> void:

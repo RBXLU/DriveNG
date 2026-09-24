@@ -34,6 +34,9 @@ func _ready() -> void:
 	apply_display_settings()
 	Settings.changed.connect(_on_settings_changed)
 	_parse_test_args()
+	if _test.has("uitest"):
+		_ui_walkthrough()
+		return
 	if _test.has("autostart"):
 		Game.selected_map = _test["autostart"]
 		Game.selected_car = _test.get("car", Game.selected_car)
@@ -118,7 +121,15 @@ func show_main_menu() -> void:
 	v.add_child(UIKit.label("Машина: %s" % spec["name"], 18, UIKit.MUTED))
 	v.add_child(UIKit.label("Графика: %s" % Settings.QUALITY_NAMES[int(Settings.get_v("quality_level"))], 16, UIKit.MUTED))
 	_set_screen(pv[0])
-	(v.get_child(2) as Button).grab_focus()
+	_focus_first(v)
+
+
+## Фокус на первую кнопку (для геймпада/клавиатуры)
+func _focus_first(v: Control) -> void:
+	for c in v.get_children():
+		if c is Button:
+			(c as Button).grab_focus()
+			return
 
 
 func show_map_select() -> void:
@@ -407,7 +418,8 @@ func apply_display_settings() -> void:
 		2: vp.msaa_3d = Viewport.MSAA_2X
 		4: vp.msaa_3d = Viewport.MSAA_4X
 		_: vp.msaa_3d = Viewport.MSAA_DISABLED
-	vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA if Settings.get_v("fxaa") else Viewport.SCREEN_SPACE_AA_DISABLED
+	if forward:
+		vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA if Settings.get_v("fxaa") else Viewport.SCREEN_SPACE_AA_DISABLED
 	Engine.max_fps = int(Settings.get_v("fps_limit"))
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED if Settings.get_v("vsync") else DisplayServer.VSYNC_DISABLED)
 	Engine.physics_ticks_per_second = int(Settings.get_v("physics_hz"))
@@ -517,7 +529,7 @@ func show_pause_menu() -> void:
 	var st := UIKit.label("Макс. скорость: %d км/ч · Пробег: %.1f км" % [int(world.max_speed * 3.6), world.distance / 1000.0], 15, UIKit.MUTED)
 	v.add_child(st)
 	_set_screen(pv[0])
-	(v.get_child(2) as Button).grab_focus()
+	_focus_first(v)
 
 
 func show_crash_menu() -> void:
@@ -593,6 +605,12 @@ func to_main_menu() -> void:
 # ---------------------------------------------------------------- динамическое разрешение и тесты
 
 func _process(delta: float) -> void:
+	if _test.has("menushot") and not in_game:
+		_test_frames += 1
+		if _test_frames == int(_test.get("frames", "60")):
+			get_viewport().get_texture().get_image().save_png(_test["menushot"])
+			print("menu shot saved")
+			get_tree().quit()
 	if in_game and not paused and Settings.get_v("auto_resolution"):
 		_fps_acc += delta / max(Engine.time_scale, 0.01)
 		_fps_frames += 1
@@ -636,3 +654,64 @@ func _test_hook() -> void:
 		var p := world.player
 		print("player speed %.1f km/h, pos %s, gear %s, rpm %d, dmg %.2f, cars %d, fps %d" % [p.speed * 3.6, str(p.global_position), p.gear_label(), int(p.rpm), p.total_damage, Game.cars.size(), Engine.get_frames_per_second()])
 		get_tree().quit()
+
+
+# ---------------------------------------------------------------- автотест интерфейса
+
+func _wait(n: int = 10) -> void:
+	for i in n:
+		await get_tree().process_frame
+
+
+func _snap(name: String) -> void:
+	await _wait(8)
+	var dir: String = _test.get("uitest")
+	if dir != "1":
+		get_viewport().get_texture().get_image().save_png(dir.path_join(name + ".png"))
+	print("UI step ok: ", name)
+
+
+func _ui_walkthrough() -> void:
+	_show_garage()
+	show_main_menu()
+	await _snap("01_menu")
+	show_map_select()
+	await _snap("02_maps")
+	show_car_select("new")
+	await _snap("03_garage")
+	show_settings("menu")
+	await _snap("04_settings")
+	show_controls("menu")
+	await _snap("05_controls")
+	Game.selected_map = "testgrounds"
+	start_game()
+	await _wait(30)
+	await _snap("06_game")
+	pause()
+	show_pause_menu()
+	await _snap("07_pause")
+	show_spawn_menu()
+	await _snap("08_spawn")
+	world.spawn_car("vostok_2107", "parked")
+	world.spawn_car("gazel", "ram")
+	show_crash_menu()
+	await _snap("09_crash")
+	show_car_select("ingame")
+	await _snap("10_car_ingame")
+	world.change_player_car("kaiser_golfer", Color.RED)
+	hud.set_car(world.player)
+	show_settings("pause")
+	await _snap("11_settings_pause")
+	Settings.apply_preset(1)
+	await _wait(5)
+	resume()
+	world.crash_test(64.0, "wall")
+	await _wait(120)
+	await _snap("12_after_crash")
+	world.repair_player()
+	world.clear_spawned()
+	await _wait(10)
+	await to_main_menu()
+	await _snap("13_back_to_menu")
+	print("UI WALKTHROUGH DONE")
+	get_tree().quit()

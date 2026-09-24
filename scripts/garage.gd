@@ -83,6 +83,8 @@ func _process(delta: float) -> void:
 	if car != null:
 		var L: float = car.spec["L"]
 		var d: float = clamp(L * 1.25 + 3.0, 6.5, 19.0)
-		# машина чуть левее центра, чтобы справа была панель
+		# сдвигаем кадр: машина справа, слева — панель меню
 		cam.position = Vector3(d * 0.62, 1.5 + L * 0.08, d * 0.78)
-		cam.look_at(Vector3(-L * 0.12, 0.7, 0))
+		cam.look_at(Vector3(0, 0.7, 0))
+		var aspect: float = get_viewport().get_visible_rect().size.aspect()
+		cam.h_offset = -d * 0.2 * clamp(aspect / 1.78, 0.6, 1.4)
